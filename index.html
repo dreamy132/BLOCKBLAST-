@@ -1,0 +1,343 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Block Blast GOD MODE</title>
+
+<style>
+:root{
+--bg:#0f172a;
+--grid:#1e293b;
+--empty:#334155;
+--cell:40px;
+}
+
+body{
+margin:0;
+font-family:sans-serif;
+background:var(--bg);
+color:white;
+display:flex;
+flex-direction:column;
+align-items:center;
+overflow:hidden;
+transition:.3s;
+}
+
+canvas#bg{
+position:fixed;
+inset:0;
+z-index:-1;
+}
+
+.light{
+--bg:#e2e8f0;
+--grid:#cbd5e1;
+--empty:#94a3b8;
+color:#111;
+}
+
+#ui{text-align:center;margin-top:15px}
+#score{font-size:2rem;font-weight:bold}
+#controls{margin-top:10px;display:flex;gap:10px;flex-wrap:wrap;justify-content:center}
+
+button{
+padding:8px 14px;
+border:none;
+border-radius:8px;
+cursor:pointer;
+}
+
+#grid{
+display:grid;
+gap:4px;
+background:var(--grid);
+padding:8px;
+border-radius:12px;
+margin:20px 0;
+}
+
+.cell{
+background:var(--empty);
+border-radius:6px;
+transition:.2s;
+}
+
+.cell.preview{opacity:.4}
+
+#dock{display:flex;gap:20px;height:120px;align-items:center}
+
+.shape{display:grid;gap:2px;cursor:grab}
+.dragging{position:fixed;pointer-events:none;z-index:1000;transform:scale(1.15)}
+.hidden{visibility:hidden}
+
+#gameover{
+position:fixed;
+inset:0;
+background:#000c;
+display:none;
+flex-direction:column;
+justify-content:center;
+align-items:center;
+}
+
+.particle{
+position:fixed;
+width:8px;
+height:8px;
+border-radius:50%;
+pointer-events:none;
+}
+</style>
+</head>
+<body>
+
+<canvas id="bg"></canvas>
+
+<div id="ui">
+<div id="score">0</div>
+<div>High: <span id="high"></span> | Best Combo: <span id="bestcombo"></span></div>
+
+<div id="controls">
+<button onclick="undo()">Undo</button>
+<button onclick="toggleTheme()">Theme</button>
+<button onclick="startAI()">AI Demo</button>
+<button onclick="restart()">Restart</button>
+</div>
+</div>
+
+<div id="grid"></div>
+<div id="dock"></div>
+
+<div id="gameover">
+<h1>Game Over</h1>
+<button onclick="restart()">Restart</button>
+</div>
+
+<script>
+/* =========================
+   SEEDED RANDOM (Daily Mode)
+========================= */
+function seededRandom(seed){
+return function(){
+seed=(seed*9301+49297)%233280;
+return seed/233280;
+}
+}
+const todaySeed=parseInt(new Date().toISOString().slice(0,10).replace(/-/g,""));
+const rand=seededRandom(todaySeed);
+
+/* =========================
+   CORE
+========================= */
+const SIZE=8;
+const COLORS=["#38bdf8","#f472b6","#34d399","#facc15","#a78bfa"];
+const SHAPES=[
+[[1]],[[1,1]],[[1,1,1]],[[1],[1]],
+[[1,1],[1,1]],
+[[1,0],[1,0],[1,1]],
+[[1,1,1],[0,1,0]]
+];
+
+let grid,score,combo,bestCombo,high;
+let dragEl,activeShape,undoState=null;
+let difficulty=1;
+let aiInterval=null;
+
+const gridEl=document.getElementById("grid");
+const dock=document.getElementById("dock");
+
+function resize(){
+const s=Math.min(window.innerWidth/10,55);
+document.documentElement.style.setProperty("--cell",s+"px");
+gridEl.style.gridTemplateColumns=`repeat(8,${s}px)`;
+}
+window.addEventListener("resize",resize);
+
+/* =========================
+   INIT
+========================= */
+function init(){
+grid=Array(SIZE).fill().map(()=>Array(SIZE).fill(null));
+score=0;combo=0;difficulty=1;
+bestCombo=localStorage.getItem("bestcombo")||0;
+high=localStorage.getItem("high")||0;
+document.getElementById("high").innerText=high;
+document.getElementById("bestcombo").innerText=bestCombo;
+document.getElementById("score").innerText=0;
+gridEl.innerHTML="";
+for(let i=0;i<64;i++){
+const c=document.createElement("div");
+c.className="cell";
+c.style.width="var(--cell)";
+c.style.height="var(--cell)";
+gridEl.appendChild(c);
+}
+refill();
+resize();
+}
+
+function restart(){
+document.getElementById("gameover").style.display="none";
+clearInterval(aiInterval);
+init();
+}
+
+/* =========================
+   SHAPES
+========================= */
+function refill(){
+dock.innerHTML="";
+for(let i=0;i<3;i++){
+let shape=JSON.parse(JSON.stringify(
+SHAPES[Math.floor(rand()*SHAPES.length)]
+));
+let obj={map:shape,color:COLORS[Math.floor(rand()*COLORS.length)]};
+createShape(obj);
+}
+}
+
+function createShape(shape){
+const el=document.createElement("div");
+el.className="shape";
+el.style.gridTemplateColumns=`repeat(${shape.map[0].length},20px)`;
+shape.map.forEach(r=>{
+r.forEach(v=>{
+const c=document.createElement("div");
+c.className="cell";
+c.style.width="20px";c.style.height="20px";
+c.style.background=v?shape.color:"transparent";
+el.appendChild(c);
+});
+});
+el.onpointerdown=e=>startDrag(e,el,shape);
+dock.appendChild(el);
+}
+
+/* =========================
+   GAME LOGIC
+========================= */
+function canPlace(r,c,shape){
+for(let i=0;i<shape.map.length;i++)
+for(let j=0;j<shape.map[0].length;j++)
+if(shape.map[i][j]){
+if(r+i>=8||c+j>=8||grid[r+i][c+j])return false;
+}
+return true;
+}
+
+function place(r,c,shape){
+for(let i=0;i<shape.map.length;i++)
+for(let j=0;j<shape.map[0].length;j++)
+if(shape.map[i][j])grid[r+i][c+j]=shape.color;
+render();
+}
+
+function render(){
+let cells=gridEl.querySelectorAll(".cell");
+grid.flat().forEach((v,i)=>{
+cells[i].style.background=v?v:"var(--empty)";
+});
+}
+
+function checkLines(){
+let cleared=0;
+for(let i=0;i<8;i++){
+if(grid[i].every(v=>v)){grid[i].fill(null);cleared++}
+if(grid.every(row=>row[i])){grid.forEach(r=>r[i]=null);cleared++}
+}
+if(cleared){
+combo++;
+if(combo>bestCombo){
+bestCombo=combo;
+localStorage.setItem("bestcombo",bestCombo);
+document.getElementById("bestcombo").innerText=bestCombo;
+}
+let points=cleared*100*combo*difficulty;
+score+=points;
+if(score>high){
+high=score;
+localStorage.setItem("high",high);
+document.getElementById("high").innerText=high;
+}
+document.getElementById("score").innerText=score;
+difficulty+=0.1;
+spawnParticles();
+}else combo=0;
+render();
+}
+
+/* =========================
+   PARTICLES
+========================= */
+function spawnParticles(){
+for(let i=0;i<30;i++){
+let p=document.createElement("div");
+p.className="particle";
+p.style.background=COLORS[Math.floor(Math.random()*COLORS.length)];
+p.style.left=Math.random()*window.innerWidth+"px";
+p.style.top=Math.random()*window.innerHeight+"px";
+document.body.appendChild(p);
+let x=(Math.random()-0.5)*200;
+let y=(Math.random()-0.5)*200;
+p.animate([{transform:"translate(0,0)",opacity:1},
+{transform:`translate(${x}px,${y}px)`,opacity:0}],
+{duration:600});
+setTimeout(()=>p.remove(),600);
+}
+}
+
+/* =========================
+   AI DEMO
+========================= */
+function startAI(){
+if(aiInterval){clearInterval(aiInterval);aiInterval=null;return}
+aiInterval=setInterval(()=>{
+let shapes=[...dock.children];
+if(!shapes.length)return;
+let shapeIndex=Math.floor(Math.random()*shapes.length);
+let shapeObj=SHAPES[shapeIndex%SHAPES.length];
+for(let r=0;r<8;r++)
+for(let c=0;c<8;c++)
+if(canPlace(r,c,{map:shapeObj,color:COLORS[0]})){
+place(r,c,{map:shapeObj,color:COLORS[0]});
+shapes[shapeIndex].remove();
+checkLines();
+if(dock.children.length===0)refill();
+return;
+}
+},400);
+}
+
+/* =========================
+   BACKGROUND ANIMATION
+========================= */
+const canvas=document.getElementById("bg");
+const ctx=canvas.getContext("2d");
+function bgResize(){canvas.width=innerWidth;canvas.height=innerHeight}
+window.addEventListener("resize",bgResize);
+bgResize();
+let stars=Array(100).fill().map(()=>({
+x:Math.random()*canvas.width,
+y:Math.random()*canvas.height,
+r:Math.random()*2
+}));
+function animateBG(){
+ctx.clearRect(0,0,canvas.width,canvas.height);
+ctx.fillStyle="#ffffff22";
+stars.forEach(s=>{
+ctx.beginPath();
+ctx.arc(s.x,s.y,s.r,0,Math.PI*2);
+ctx.fill();
+s.y+=0.3;
+if(s.y>canvas.height)s.y=0;
+});
+requestAnimationFrame(animateBG);
+}
+animateBG();
+
+init();
+</script>
+</body>
+</html>
